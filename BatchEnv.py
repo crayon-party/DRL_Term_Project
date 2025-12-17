@@ -11,13 +11,19 @@ class BatchEnv(gym.Env):
         self.action_space = spaces.Discrete(1 + 3*3) # 1 action (stop & reset) + 3*3 actions (feed A and B)
         self.observation_space = spaces.Box(low=np.array([0, 0, 0, 0, 20, 2.5, 1.4], dtype=np.float32), 
                                             high=np.array([10, 10, 10, 10, 100, 17.5, 6.6], dtype=np.float32), shape=(7,))
-
         self.render_mode = None
+        self.cum_A_fed = 0.0 #mol
+        self.cum_B_fed = 0.0 #mol
+        self.gamma = 0.99
+
+    def _get_obs(self):
+        return self.simulator._get_obs()
 
     def reset(self, seed: int = None, options: dict = None):
         self.simulator = Simulator(seed)
         state = self.simulator.reset()
-
+        self.cum_A_fed = 0.0
+        self.cum_B_fed = 0.0
         self.profit_tracker = 0.0
 
         return state, {'time': self.simulator.time}
@@ -26,6 +32,7 @@ class BatchEnv(gym.Env):
         P_A = self.simulator.P_A
         P_B = self.simulator.P_B
         P_D = self.simulator.P_D
+        prev_state = self._get_obs()  # [A,B,D,U,V,PB,PD]
 
         reward = 0.0
 
@@ -38,23 +45,50 @@ class BatchEnv(gym.Env):
             clean = False
             F_A_bin = [0.0, 5.0, 10.0]
             F_B_bin = [0.0, 5.0, 10.0]
-            F_A = F_A_bin[(action-1) % 3]
-            F_B = F_B_bin[(action-1) // 3]
+            F_A = F_A_bin[(action - 1) % 3]
+            F_B = F_B_bin[(action - 1) // 3]
 
         next_state, info = self.simulator.step(clean, F_A, F_B)
+
+        # Update cumulative feeds IMMEDIATELY after simulator (cum_A_fed affects phi_next)
+        if not clean:  # Don't accumulate on STOP
+            self.cum_A_fed += info['used_A']
+            self.cum_B_fed += info['used_B']
+
+        # Potential shaping
+        # Before: just after simulator.step and cum_A_fed/B_fed update
+        phi_prev = (
+                prev_state[6] * prev_state[2] * prev_state[4]
+                - 0.5 * self.cum_A_fed
+                - prev_state[5] * self.cum_B_fed
+        )
+
+        purity_next = next_state[2] / (next_state[2] + next_state[3] + 1e-6)
+        phi_next = next_state[6] * next_state[2] * next_state[4] * (0.75 + 0.25 * purity_next) - 0.5 * self.cum_A_fed - \
+                   next_state[5] * self.cum_B_fed
+
+        #phi_next = (
+        #        next_state[6] * next_state[2] * next_state[4] * purity_next
+        #        - 0.5 * self.cum_A_fed
+        #        - next_state[5] * self.cum_B_fed
+        #)
+
+        shaping = 0.1 * (self.gamma * phi_next - phi_prev)
+        reward += shaping
 
         terminated = False
         truncated = False
 
-        reward = 0.0
         if action == 0:
-            if purity < 0.7:
-                info['sold_D'] = 0.0
-            reward = self.profit_tracker + info['sold_D'] * P_D
+            purity = next_state[2] / (next_state[2] + next_state[3] + 1e-6)
+            if purity >= 0.7:
+                reward += self.profit_tracker + info['sold_D'] *P_D
+            #reward = self.profit_tracker + info['sold_D'] * P_D
             self.profit_tracker = 0.0
-
-        # update profit tracker
-        self.profit_tracker -= info['used_A'] * P_A + info['used_B'] * P_B
+        else:
+            self.profit_tracker -= info['used_A']*P_A + info['used_B']*P_B # Update profit tracker
+        #reward +=shaping
+        #self.profit_tracker = 0.0  # Reset
 
         return next_state, reward, terminated, truncated, info
 
