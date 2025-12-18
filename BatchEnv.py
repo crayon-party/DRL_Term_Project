@@ -34,41 +34,55 @@ class BatchEnv(gym.Env):
 
         return state, {'time': self.simulator.time}
 
+
     def step(self, action: int):
         P_A, P_B, P_D = self.simulator.P_A, self.simulator.P_B, self.simulator.P_D
         prev_state = self._get_obs()
 
-        # CALCULATE PURITY BEFORE reset (for STOP actions)
-        current_purity = None
-        if action == 0:
-            current_state = self.simulator.state
-            current_purity = current_state[2] / (current_state[2] + current_state[3] + 1e-6)
-            #print(f"PRE-STOP purity={current_purity:.3f}, D={current_state[2]:.2f}, U={current_state[3]:.2f}")
-
         reward = 0.0
         terminated = truncated = False
 
-        # Action decoding + simulation (same as before)
+        # 1. HANDLE STOP ACTION FIRST (before simulation)
         if action == 0:
-            clean = True;
-            F_A = F_B = 0.0
+            current_purity = prev_state[2] / (prev_state[2] + prev_state[3] + 1e-6)
+
+            # Illegal STOP penalty
+            if not self.has_fed:
+                self.profit_tracker = 0.0
+                self.has_fed = False
+                return prev_state, -5.0, False, False, {"illegal_stop": True}
+
+            # Calculate true profit and terminal reward
+            total_D = prev_state[2] * prev_state[4]  # D moles before reset
+            true_profit = self.profit_tracker + total_D * P_D
+
+            terminated = True
+            if current_purity >= 0.7:
+                bonus = 0.02 * abs(true_profit)
+                reward = true_profit + bonus
+            else:
+                reward = -1.0
+
+            # Reset for next episode
+            next_state, info = self.simulator._stop()
+            self.profit_tracker = 0.0
+            self.has_fed = False
+
+        # 2. HANDLE FEED ACTIONS (non-STOP)
         else:
-            clean = False
             F_A_bin = F_B_bin = [0.0, 5.0, 10.0]
             F_A = F_A_bin[(action - 1) % 3]
             F_B = F_B_bin[(action - 1) // 3]
 
-        next_state, info = self.simulator.step(clean, F_A, F_B)
-
-        # Feed handling (non-STOP)
-        if not clean:
+            # Track feeding costs BEFORE simulation
+            next_state, info = self.simulator.step(False, F_A, F_B)
             cost = info['used_A'] * P_A + info['used_B'] * P_B
             self.profit_tracker -= cost
             self.cum_A_fed += info['used_A']
             self.cum_B_fed += info['used_B']
             self.has_fed = True
 
-            # Shaping
+            # Potential shaping reward
             phi_prev = prev_state[6] * prev_state[2] * prev_state[4] - 0.5 * self.cum_A_fed - prev_state[
                 5] * self.cum_B_fed
             phi_next = next_state[6] * next_state[2] * next_state[4] - 0.5 * self.cum_A_fed - next_state[
@@ -76,26 +90,12 @@ class BatchEnv(gym.Env):
             shaping = 0.01 * (self.gamma * phi_next - phi_prev)
             reward += shaping
 
-        # Illegal STOP
-        if action == 0 and not self.has_fed:
-            return prev_state, -5.0, False, False, {"illegal_stop": True}
-
-        # TERMINAL - USE PRE-CALCULATED PURITY
-        if action == 0:
-            terminated = True
-            if current_purity >= 0.7:  # Use PRE-STOP purity!
-                true_profit = self.profit_tracker + info['sold_D'] * P_D
-                bonus = 0.02 * abs(true_profit)  # 2% bonus
-                reward += true_profit + bonus
-            else:
-                reward -= 10.0
-                #print(
-                #    f"CLEAN true_profit={true_profit:.1f}$ (D={info['sold_D']:.0f}, costs={self.profit_tracker:.0f}$)")
-            self.profit_tracker = 0.0
-
         self.step_count += 1
         if self.step_count >= self.max_steps:
             truncated = True
+
+        info['true_profit'] = true_profit if action == 0 else 0.0
+        info['purity'] = prev_state[2] / (prev_state[2] + prev_state[3] + 1e-6) if action == 0 else 0.0
 
         return next_state, reward, terminated, truncated, info
 

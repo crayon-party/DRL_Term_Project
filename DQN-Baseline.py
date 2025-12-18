@@ -48,8 +48,8 @@ class DQNAgent:
 
         # Heuristic STOP exploration
         if episode_idx is not None and step_in_ep is not None:
-            if step_in_ep >= 4 and purity > 0.6:
-                if np.random.rand() < 0.3:
+            if step_in_ep >= 6 and purity > 0.6:
+                if np.random.rand() < 0.5:
                     return 0  # STOP
 
         # ε-greedy fallback
@@ -114,47 +114,62 @@ if __name__ == "__main__": # Test it works first
     state, info = env.reset()
     print("BatchEnv works:", state)
 
+expert_actions = [4, 4, 1, 2, 1, 1, 1, 1, 0,
+                  4, 4, 2, 5, 1, 1, 4, 1, 1, 0]
+
 agent = DQNAgent()
-episodes = 2000
+episodes = 500
 epsilons = []
 scores = []
 stop_frequencies = []
+true_profits = []
 
 for e in range(episodes): # 1000 episodes (batches)
+    #use_expert = (np.random.rand() < 0.1)  # 10% expert episodes
     step_count = 0
     max_steps = 30
     state, info = env.reset() # New batch: 20L A, random prices
     trajectory = [] #
     total_reward = 0
     stop_count = 0
-    #true_profit = 0.0
     episode_true_profit = 0.0
+    #if use_expert:
+    #    print(f"*** EXPERT Ep{e} actions: ", end="")
 
     while step_count < max_steps: # Max 30 steps per batch (safety)
         #action = agent.act(state) # ε-greedy action (0=stop, 1-9=feed)
+        #if use_expert and step_count < len(expert_actions):
+        #    action = expert_actions[step_count]
+        #else:
         action = agent.act(state, episode_idx=e, step_in_ep=step_count)
-        if action == 0:
-            stop_count += 1
 
         next_state, reward, done, truncated, info = env.step(action)
+        #print(f"Action {action}: done={done}, purity={info.get('purity', 0):.2f}, V={next_state[4]:.1f}L")
         agent.remember(state, action, reward, next_state, done) # Store (s,a,r,s',done) in replay
         agent.replay() # Train on random batch
 
-        #true_profit += info.get('true_profit', 0.0)  # Capture each CLEAN profit
+        #action = agent.act(state, episode_idx=e, step_in_ep=step_count)
+        total_reward += reward # Sum batch profit
+        if action == 0:
+            stop_count += 1
 
         state = next_state
-
-        episode_true_profit += info.get('true_profit', 0.0)
-        total_reward += reward # Sum batch profit
         step_count += 1
 
         if done or truncated:
-            break # Episode ends when action=0 (batch complete)
+            episode_true_profit = info.get('true_profit', 0.0)
+            true_profits.append(episode_true_profit)  # ← CRITICAL LINE
+            scores.append(total_reward)
 
-        trajectory.append(state.copy()) # ← STORE STATE
-        scores.append(total_reward) # Record episode profit
-        stop_frequencies.append(stop_count / step_count)
-        epsilons.append(agent.epsilon)
+            #print(f"APPENDED Ep{e}: true_profit={episode_true_profit:.1f}, list_len={len(true_profits)}")
+
+            break  # Episode ends when action=0 (batch complete)
+    #true_profits.append(episode_true_profit)
+    trajectory.append(state.copy()) # ← STORE STATE
+    #scores.append(total_reward) # Record episode profit
+    stop_frequencies.append(stop_count / step_count)
+    epsilons.append(agent.epsilon)
+
     if done:
         print(f"Ep{e}: true_profit={episode_true_profit:.1f}, shaped={total_reward:.1f}")
 
@@ -168,35 +183,36 @@ for e in range(episodes): # 1000 episodes (batches)
         print(f"Ep{e} trajectory V: {volumes[:10]}... (len={len(trajectory)})")
         agent.log_q_values(state) # Diagnose: Q[stop] >> Q[feed]?
         print(f"Ep{e}, Final V: {state[4]:.1f}L, D: {state[2]:.2f}, ε: {agent.epsilon:.3f}")
+
 # -------------------------------
 # RANDOM POLICY BASELINE
 # -------------------------------
-def run_random_policy(env, episodes=1000, max_steps=30):
-    random_scores = []
+#def run_random_policy(env, episodes=1000, max_steps=30):
+#    random_scores = []
 
-    for ep in range(episodes):
-        state, _ = env.reset()
-        total_reward = 0
+#    for ep in range(episodes):
+#        state, _ = env.reset()
+#       total_reward = 0
 
-        for t in range(max_steps):
-            action = np.random.randint(0, env.action_space.n)  # uniform random
-            next_state, reward, done, truncated, _ = env.step(action)
-            total_reward += reward
-            state = next_state
+#        for t in range(max_steps):
+#            action = np.random.randint(0, env.action_space.n)  # uniform random
+#            next_state, reward, done, truncated, _ = env.step(action)
+#            total_reward += reward
+#            state = next_state
 
-            if done or truncated:
-                break
+#            if done or truncated:
+#                break
 
-        random_scores.append(total_reward)
+#        random_scores.append(total_reward)
 
-    return random_scores
+#    return random_scores
 
 
 # Run baseline
-random_env = BatchEnv(seed=123)
-random_scores = run_random_policy(random_env, episodes=episodes)
+#random_env = BatchEnv(seed=123)
+#random_scores = run_random_policy(random_env, episodes=episodes)
 
-print(f"Random policy avg reward: {np.mean(random_scores):.2f}")
+#print(f"Random policy avg reward: {np.mean(random_scores):.2f}")
 print(f"DQN policy avg reward: {np.mean(scores[-100:]):.2f}")
 
 
@@ -235,15 +251,44 @@ plt.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
 plt.tight_layout()
 plt.show()
 
+plt.figure(figsize=(15, 4))
 
-plt.figure(figsize=(12,6))
-plt.plot(scores, label="DQN (learning)", alpha=0.7)
-plt.plot(random_scores, label="Random Policy", linestyle="--", alpha=0.8)
-plt.axhline(0, color="black", linewidth=1)
-plt.xlabel("Episode")
-plt.ylabel("Episode Reward")
-plt.title("DQN vs Random Policy on BatchEnv")
+# Plot 1: True profit (thick blue line)
+plt.subplot(1, 3, 1)
+plt.plot(true_profits, 'b-', linewidth=2, label='True Profit', alpha=0.9)
+plt.plot(scores, 'r--', linewidth=1, label='Shaped Reward', alpha=0.6)
+plt.ylabel('$/Episode')
 plt.legend()
-plt.grid(True)
+plt.title('True vs Shaped')
+
+# Plot 2: True profit only (clean)
+plt.subplot(1, 3, 2)
+plt.plot(true_profits, 'g-', linewidth=2)
+plt.ylabel('True Profit ($)')
+plt.title('True Profit Only')
+plt.grid(True, alpha=0.3)
+
+# Plot 3: Moving average
+if len(true_profits) >= 100:
+    ma100 = np.convolve(true_profits, np.ones(100)/100, mode='valid')
+    plt.subplot(1, 3, 3)
+    plt.plot(ma100, 'orange', linewidth=3)
+    plt.title('100-Ep Moving Avg')
+    plt.ylabel('True Profit ($)')
+    plt.grid(True, alpha=0.3)
+
 plt.tight_layout()
 plt.show()
+
+
+#plt.figure(figsize=(12,6))
+#plt.plot(scores, label="DQN (learning)", alpha=0.7)
+#plt.plot(random_scores, label="Random Policy", linestyle="--", alpha=0.8)
+#plt.axhline(0, color="black", linewidth=1)
+#plt.xlabel("Episode")
+#plt.ylabel("Episode Reward")
+#plt.title("DQN vs Random Policy on BatchEnv")
+#plt.legend()
+#plt.grid(True)
+#plt.tight_layout()
+#plt.show()
