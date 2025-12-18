@@ -14,7 +14,11 @@ class BatchEnv(gym.Env):
         self.render_mode = None
         self.cum_A_fed = 0.0 #mol
         self.cum_B_fed = 0.0 #mol
-        self.gamma = 0.99
+        self.gamma = 0.95
+        self.has_fed = getattr(self, "has_fed", False)
+
+        self.step_count = 0
+        self.max_steps = 30
 
     def _get_obs(self):
         return self.simulator._get_obs()
@@ -25,72 +29,74 @@ class BatchEnv(gym.Env):
         self.cum_A_fed = 0.0
         self.cum_B_fed = 0.0
         self.profit_tracker = 0.0
+        self.has_fed = False
+        self.step_count = 0
 
         return state, {'time': self.simulator.time}
 
     def step(self, action: int):
-        P_A = self.simulator.P_A
-        P_B = self.simulator.P_B
-        P_D = self.simulator.P_D
-        prev_state = self._get_obs()  # [A,B,D,U,V,PB,PD]
+        P_A, P_B, P_D = self.simulator.P_A, self.simulator.P_B, self.simulator.P_D
+        prev_state = self._get_obs()
+
+        # CALCULATE PURITY BEFORE reset (for STOP actions)
+        current_purity = None
+        if action == 0:
+            current_state = self.simulator.state
+            current_purity = current_state[2] / (current_state[2] + current_state[3] + 1e-6)
+            #print(f"PRE-STOP purity={current_purity:.3f}, D={current_state[2]:.2f}, U={current_state[3]:.2f}")
 
         reward = 0.0
+        terminated = truncated = False
 
+        # Action decoding + simulation (same as before)
         if action == 0:
-            clean = True
-            F_A = 0.0
-            F_B = 0.0
-            purity = self.simulator.state[2] / (self.simulator.state[2] + self.simulator.state[3] + 1e-6)
+            clean = True;
+            F_A = F_B = 0.0
         else:
             clean = False
-            F_A_bin = [0.0, 5.0, 10.0]
-            F_B_bin = [0.0, 5.0, 10.0]
+            F_A_bin = F_B_bin = [0.0, 5.0, 10.0]
             F_A = F_A_bin[(action - 1) % 3]
             F_B = F_B_bin[(action - 1) // 3]
 
         next_state, info = self.simulator.step(clean, F_A, F_B)
 
-        # Update cumulative feeds IMMEDIATELY after simulator (cum_A_fed affects phi_next)
-        if not clean:  # Don't accumulate on STOP
+        # Feed handling (non-STOP)
+        if not clean:
+            cost = info['used_A'] * P_A + info['used_B'] * P_B
+            self.profit_tracker -= cost
             self.cum_A_fed += info['used_A']
             self.cum_B_fed += info['used_B']
+            self.has_fed = True
 
-        # Potential shaping
-        # Before: just after simulator.step and cum_A_fed/B_fed update
-        phi_prev = (
-                prev_state[6] * prev_state[2] * prev_state[4]
-                - 0.5 * self.cum_A_fed
-                - prev_state[5] * self.cum_B_fed
-        )
+            # Shaping
+            phi_prev = prev_state[6] * prev_state[2] * prev_state[4] - 0.5 * self.cum_A_fed - prev_state[
+                5] * self.cum_B_fed
+            phi_next = next_state[6] * next_state[2] * next_state[4] - 0.5 * self.cum_A_fed - next_state[
+                5] * self.cum_B_fed
+            shaping = 0.01 * (self.gamma * phi_next - phi_prev)
+            reward += shaping
 
-        purity_next = next_state[2] / (next_state[2] + next_state[3] + 1e-6)
-        phi_next = next_state[6] * next_state[2] * next_state[4] * (0.75 + 0.25 * purity_next) - 0.5 * self.cum_A_fed - \
-                   next_state[5] * self.cum_B_fed
+        # Illegal STOP
+        if action == 0 and not self.has_fed:
+            return prev_state, -5.0, False, False, {"illegal_stop": True}
 
-        #phi_next = (
-        #        next_state[6] * next_state[2] * next_state[4] * purity_next
-        #        - 0.5 * self.cum_A_fed
-        #        - next_state[5] * self.cum_B_fed
-        #)
-
-        shaping = 0.1 * (self.gamma * phi_next - phi_prev)
-        reward += shaping
-
-        terminated = False
-        truncated = False
-
+        # TERMINAL - USE PRE-CALCULATED PURITY
         if action == 0:
-            purity = next_state[2] / (next_state[2] + next_state[3] + 1e-6)
-            if purity >= 0.7:
-                reward += self.profit_tracker + info['sold_D'] *P_D
-            #reward = self.profit_tracker + info['sold_D'] * P_D
+            terminated = True
+            if current_purity >= 0.7:  # Use PRE-STOP purity!
+                true_profit = self.profit_tracker + info['sold_D'] * P_D
+                bonus = 0.02 * abs(true_profit)  # 2% bonus
+                reward += true_profit
+                #print(
+                #    f"CLEAN true_profit={true_profit:.1f}$ (D={info['sold_D']:.0f}, costs={self.profit_tracker:.0f}$)")
             self.profit_tracker = 0.0
-        else:
-            self.profit_tracker -= info['used_A']*P_A + info['used_B']*P_B # Update profit tracker
-        #reward +=shaping
-        #self.profit_tracker = 0.0  # Reset
+
+        self.step_count += 1
+        if self.step_count >= self.max_steps:
+            truncated = True
 
         return next_state, reward, terminated, truncated, info
+
 
 class Simulator:
     """

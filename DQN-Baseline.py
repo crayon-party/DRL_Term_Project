@@ -42,14 +42,35 @@ class DQNAgent:
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
 
-    def act(self, state): # Choose action
-        if np.random.rand() <= self.epsilon: # ε-greedy return
-            return random.randrange(self.action_size) # Explore: random (0-9)
-        state = torch.FloatTensor(state).unsqueeze(0) # Exploit: pick best Q-value action
+    def act(self, state, episode_idx=None, step_in_ep=None):
+        C_A, C_B, C_D, C_U, V, P_B, P_D = state
+        purity = C_D / (C_D + C_U + 1e-6)
+
+        # Heuristic STOP exploration
+        if episode_idx is not None and step_in_ep is not None:
+            if step_in_ep >= 4 and purity > 0.6:
+                if np.random.rand() < 0.3:
+                    return 0  # STOP
+
+        # ε-greedy fallback
+        if np.random.rand() <= self.epsilon:
+            return np.random.randint(0, self.action_size)
+
         with torch.no_grad():
-            act_values = self.model(state)
+            qvals = self.model(torch.FloatTensor(state).unsqueeze(0))
+        return int(qvals.argmax().item())
+
+        #if np.random.rand() <= self.epsilon: # ε-greedy return
+            #return random.randrange(self.action_size) # Explore: random (0-9)
+        #    if np.random.rand() < 0.2:
+        #        return 0  # STOP
+        #    return random.randrange(1, self.action_size)  # any feed action
+
+        #state = torch.FloatTensor(state).unsqueeze(0) # Exploit: pick best Q-value action
+        #with torch.no_grad():
+        #    act_values = self.model(state)
         #act_values = self.model(state) # Get Q(s,a) for all 10 actions
-        return np.argmax(act_values.cpu().data.numpy()) # Pick highest Q-value
+        #return np.argmax(act_values.cpu().data.numpy()) # Pick highest Q-value
 
     def replay(self, batch_size=32): # Sample 32 experiences,
         if len(self.memory) < batch_size:
@@ -106,9 +127,12 @@ for e in range(episodes): # 1000 episodes (batches)
     trajectory = [] #
     total_reward = 0
     stop_count = 0
+    #true_profit = 0.0
+    episode_true_profit = 0.0
 
     while step_count < max_steps: # Max 30 steps per batch (safety)
-        action = agent.act(state) # ε-greedy action (0=stop, 1-9=feed)
+        #action = agent.act(state) # ε-greedy action (0=stop, 1-9=feed)
+        action = agent.act(state, episode_idx=e, step_in_ep=step_count)
         if action == 0:
             stop_count += 1
 
@@ -116,17 +140,26 @@ for e in range(episodes): # 1000 episodes (batches)
         agent.remember(state, action, reward, next_state, done) # Store (s,a,r,s',done) in replay
         agent.replay() # Train on random batch
 
+        #true_profit += info.get('true_profit', 0.0)  # Capture each CLEAN profit
+
         state = next_state
+
+        episode_true_profit += info.get('true_profit', 0.0)
         total_reward += reward # Sum batch profit
         step_count += 1
 
         if done or truncated:
             break # Episode ends when action=0 (batch complete)
 
-    trajectory.append(state.copy()) # ← STORE STATE
-    scores.append(total_reward) # Record episode profit
-    stop_frequencies.append(stop_count / step_count)
-    epsilons.append(agent.epsilon)
+        trajectory.append(state.copy()) # ← STORE STATE
+        scores.append(total_reward) # Record episode profit
+        stop_frequencies.append(stop_count / step_count)
+        epsilons.append(agent.epsilon)
+    if done:
+        print(f"Ep{e}: true_profit={episode_true_profit:.1f}, shaped={total_reward:.1f}")
+
+    #if done:
+    #    print(f"Ep{e}: true_profit={true_profit:.1f}, shaped={total_reward:.1f}")
 
     if e % 100 == 0:
         print(f"Episode {e}, Avg Score: {np.mean(scores[-100:]):.2f}")
