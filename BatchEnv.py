@@ -86,7 +86,9 @@ class BatchEnv(gym.Env):
             if current_purity >= 0.7:  # Use PRE-STOP purity!
                 true_profit = self.profit_tracker + info['sold_D'] * P_D
                 bonus = 0.02 * abs(true_profit)  # 2% bonus
-                reward += true_profit
+                reward += true_profit + bonus
+            else:
+                reward -= 10.0
                 #print(
                 #    f"CLEAN true_profit={true_profit:.1f}$ (D={info['sold_D']:.0f}, costs={self.profit_tracker:.0f}$)")
             self.profit_tracker = 0.0
