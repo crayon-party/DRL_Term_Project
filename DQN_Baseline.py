@@ -8,7 +8,7 @@ from BatchEnv import BatchEnv
 import matplotlib.pyplot as plt
 
 class DQN(nn.Module): # Neural net: state → 10 Q-values (one per action)
-    def __init__(self, state_size=7, action_size=10): # 7 obs → 10 actions
+    def __init__(self, state_size=8, action_size=10): # 7 obs → 10 actions
         super().__init__()
         self.fc1 = nn.Linear(state_size, 128) # Layer 1: 7→128 neuron
         self.fc2 = nn.Linear(128, 128) # Layer 2: 128→128
@@ -20,14 +20,14 @@ class DQN(nn.Module): # Neural net: state → 10 Q-values (one per action)
         return self.fc3(x) # Raw Q-values (no-softmax)
 
 class DQNAgent:
-    def __init__(self, state_size=7, action_size=10):
+    def __init__(self, state_size=8, action_size=10):
         self.state_size = state_size # 7 (your obs: C_A,B,D,U,V,P_B,P_D)
         self.action_size = action_size # 10 (0=stop, 1-9=feed pairs)
         self.memory = deque(maxlen=10000) # Experience replay buffer
         self.gamma = 0.999 # High discount: value future profits heavily
         self.epsilon = 1.0 # Exploration: 100% random at start
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.9999
+        self.epsilon_decay = 0.9995
         self.model = DQN(state_size, action_size) # Main network (trained)
         self.target_model = DQN(state_size, action_size) # Target network (updated every 100 steps - stabilizes training)
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
@@ -43,13 +43,13 @@ class DQNAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state, episode_idx=None, step_in_ep=None):
-        C_A, C_B, C_D, C_U, V, P_B, P_D = state
+        C_A, C_B, C_D, C_U, V, P_B, P_D, t_norm = state
         purity = C_D / (C_D + C_U + 1e-6)
 
         # Heuristic STOP exploration
         if episode_idx is not None and step_in_ep is not None:
-            if step_in_ep >= 6 and purity > 0.6:
-                if np.random.rand() < 0.5:
+            if step_in_ep >= 6 and purity > 0.7:
+                if np.random.rand() < 0.3:
                     return 0  # STOP
 
         # ε-greedy fallback
@@ -60,17 +60,6 @@ class DQNAgent:
             qvals = self.model(torch.FloatTensor(state).unsqueeze(0))
         return int(qvals.argmax().item())
 
-        #if np.random.rand() <= self.epsilon: # ε-greedy return
-            #return random.randrange(self.action_size) # Explore: random (0-9)
-        #    if np.random.rand() < 0.2:
-        #        return 0  # STOP
-        #    return random.randrange(1, self.action_size)  # any feed action
-
-        #state = torch.FloatTensor(state).unsqueeze(0) # Exploit: pick best Q-value action
-        #with torch.no_grad():
-        #    act_values = self.model(state)
-        #act_values = self.model(state) # Get Q(s,a) for all 10 actions
-        #return np.argmax(act_values.cpu().data.numpy()) # Pick highest Q-value
 
     def replay(self, batch_size=32): # Sample 32 experiences,
         if len(self.memory) < batch_size:
@@ -107,18 +96,18 @@ class DQNAgent:
             #├─ Compute loss = [Q(s,a) - (r + γ max Q_target(s',a'))]²
             #├─ loss.backward() + optimizer.step() ← WEIGHTS UPDATE
             #├─ ε *= 0.995 ← LESS RANDOM
-            # └─ Copy target net every 100 steps ← STABILITY
+            #└─ Copy target net every 100 steps ← STABILITY
 #Training loop
-if __name__ == "__main__": # Test it works first
+if __name__ == "__main__":
     env = BatchEnv(seed=42)
     state, info = env.reset()
+    print("state shape at reset:", state.shape)
+    next_state, _, _, _, _ = env.step(1)
+    print("state shape after step:", next_state.shape)
     print("BatchEnv works:", state)
 
-expert_actions = [4, 4, 1, 2, 1, 1, 1, 1, 0,
-                  4, 4, 2, 5, 1, 1, 4, 1, 1, 0]
-
 agent = DQNAgent()
-episodes = 500
+episodes = 2000
 epsilons = []
 scores = []
 stop_frequencies = []
@@ -137,18 +126,13 @@ for e in range(episodes): # 1000 episodes (batches)
     #    print(f"*** EXPERT Ep{e} actions: ", end="")
 
     while step_count < max_steps: # Max 30 steps per batch (safety)
-        #action = agent.act(state) # ε-greedy action (0=stop, 1-9=feed)
-        #if use_expert and step_count < len(expert_actions):
-        #    action = expert_actions[step_count]
-        #else:
+        # ε-greedy action (0=stop, 1-9=feed)
         action = agent.act(state, episode_idx=e, step_in_ep=step_count)
 
         next_state, reward, done, truncated, info = env.step(action)
-        #print(f"Action {action}: done={done}, purity={info.get('purity', 0):.2f}, V={next_state[4]:.1f}L")
         agent.remember(state, action, reward, next_state, done) # Store (s,a,r,s',done) in replay
         agent.replay() # Train on random batch
 
-        #action = agent.act(state, episode_idx=e, step_in_ep=step_count)
         total_reward += reward # Sum batch profit
         if action == 0:
             stop_count += 1
@@ -160,10 +144,8 @@ for e in range(episodes): # 1000 episodes (batches)
             episode_true_profit = info.get('true_profit', 0.0)
             true_profits.append(episode_true_profit)  # ← CRITICAL LINE
             scores.append(total_reward)
-
-            #print(f"APPENDED Ep{e}: true_profit={episode_true_profit:.1f}, list_len={len(true_profits)}")
-
             break  # Episode ends when action=0 (batch complete)
+
     #true_profits.append(episode_true_profit)
     trajectory.append(state.copy()) # ← STORE STATE
     #scores.append(total_reward) # Record episode profit
@@ -173,9 +155,6 @@ for e in range(episodes): # 1000 episodes (batches)
     if done:
         print(f"Ep{e}: true_profit={episode_true_profit:.1f}, shaped={total_reward:.1f}")
 
-    #if done:
-    #    print(f"Ep{e}: true_profit={true_profit:.1f}, shaped={total_reward:.1f}")
-
     if e % 100 == 0:
         print(f"Episode {e}, Avg Score: {np.mean(scores[-100:]):.2f}")
         print(f"Ep{e}, Final V: {state[4]:.1f}L, Reward: {total_reward:.1f}")
@@ -183,6 +162,10 @@ for e in range(episodes): # 1000 episodes (batches)
         print(f"Ep{e} trajectory V: {volumes[:10]}... (len={len(trajectory)})")
         agent.log_q_values(state) # Diagnose: Q[stop] >> Q[feed]?
         print(f"Ep{e}, Final V: {state[4]:.1f}L, D: {state[2]:.2f}, ε: {agent.epsilon:.3f}")
+
+# ----- Save trained agent -----
+torch.save(agent.model.state_dict(), "final_dqn_weights.pt")
+print("Saved trained DQN weights to final_dqn_weights.pt")
 
 # -------------------------------
 # RANDOM POLICY BASELINE
@@ -215,7 +198,20 @@ for e in range(episodes): # 1000 episodes (batches)
 #print(f"Random policy avg reward: {np.mean(random_scores):.2f}")
 print(f"DQN policy avg reward: {np.mean(scores[-100:]):.2f}")
 
+# --- Risk-adjusted evaluation over last 500 episodes ---
+tp = np.array(true_profits)
+tp_last = tp[-500:] if tp.shape[0] >= 500 else tp
 
+mean_profit = tp_last.mean()
+std_profit  = tp_last.std(ddof=1) if tp_last.shape[0] > 1 else 0.0
+var_5       = np.percentile(tp_last, 5)
+
+print("\n=== Risk-adjusted metrics (last 500 eps) ===")
+print(f"Mean true profit per batch: {mean_profit:.2f}")
+print(f"Std of true profit        : {std_profit:.2f}")
+print(f"5% Value-at-Risk (VaR)    : {var_5:.2f}")
+
+# Episode Rewards Plot
 plt.figure(figsize=(12,8))
 plt.subplot(2,2,1)
 plt.plot(scores)
@@ -225,6 +221,7 @@ plt.xlabel('Episode')
 plt.tight_layout()
 plt.show()
 
+# STOP Frequency Plot
 plt.figure(figsize=(10,4))
 plt.plot(stop_frequencies)
 plt.title("STOP Action Frequency per Episode")
@@ -233,6 +230,8 @@ plt.ylabel("STOP Frequency")
 plt.ylim(0, 1)
 plt.grid(True)
 plt.show()
+
+# ε - Decay vs Reward
 plt.figure(figsize=(12,5))
 # Left axis: reward
 plt.plot(scores, label="Episode Reward", alpha=0.6)
@@ -251,6 +250,7 @@ plt.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
 plt.tight_layout()
 plt.show()
 
+# True Profit Trends:
 plt.figure(figsize=(15, 4))
 
 # Plot 1: True profit (thick blue line)
@@ -281,14 +281,132 @@ plt.tight_layout()
 plt.show()
 
 
-#plt.figure(figsize=(12,6))
-#plt.plot(scores, label="DQN (learning)", alpha=0.7)
-#plt.plot(random_scores, label="Random Policy", linestyle="--", alpha=0.8)
-#plt.axhline(0, color="black", linewidth=1)
-#plt.xlabel("Episode")
-#plt.ylabel("Episode Reward")
-#plt.title("DQN vs Random Policy on BatchEnv")
-#plt.legend()
-#plt.grid(True)
-#plt.tight_layout()
-#plt.show()
+# Rolling mean and std of true profit
+tp = np.array(true_profits)
+window = 100   # rolling window size
+
+# rolling mean
+rolling_mean = np.convolve(tp, np.ones(window)/window, mode='valid')
+
+# rolling std: compute with looping for clarity
+rolling_std = []
+for i in range(len(tp) - window + 1):
+    segment = tp[i:i+window]
+    rolling_std.append(segment.std(ddof=1))
+rolling_std = np.array(rolling_std)
+
+plt.figure(figsize=(10,4))
+plt.plot(rolling_mean, label=f'{window}-ep rolling mean')
+plt.fill_between(
+    np.arange(len(rolling_mean)),
+    rolling_mean - rolling_std,
+    rolling_mean + rolling_std,
+    alpha=0.2,
+    label='±1 std'
+)
+plt.xlabel('Episode')
+plt.ylabel('True Profit ($)')
+plt.title(f'Rolling mean and std of true profit ({window}-episode window)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+
+# Evaluation Rollouts (5 episodes)
+def rollout_episode(env, agent):
+    states = []
+    actions = []
+    rewards = []
+    infos   = []
+
+    state, info = env.reset()
+    done = False
+    step = 0
+
+    while not done and step < 30:
+        action = agent.act(state)          # use greedy/low‑epsilon policy
+        next_state, reward, done, trunc, info = env.step(action)
+
+        states.append(state.copy())
+        actions.append(action)
+        rewards.append(reward)
+        infos.append(info)
+
+        state = next_state
+        step += 1
+
+    return np.array(states), np.array(actions), np.array(rewards), infos
+
+# Run a few evaluation episodes
+eval_episodes = 5
+for ep in range(eval_episodes):
+    states, actions, rewards, infos = rollout_episode(env, agent)
+
+    C_A = states[:,0]
+    C_B = states[:,1]
+    C_D = states[:,2]
+    C_U = states[:,3]
+    V   = states[:,4]
+    P_B = states[:,5]
+    P_D = states[:,6]
+    t_steps = np.arange(len(states)) * env.simulator.dt  # hours
+
+    purity = C_D / (C_D + C_U + 1e-6)
+
+    # Identify STOP step and print key numbers for the report
+    stop_indices = np.where(actions == 0)[0]
+    if stop_indices.size > 0:
+        stop_idx = stop_indices[0]
+        t_stop = t_steps[stop_idx]
+        purity_stop = purity[stop_idx]
+        V_stop = V[stop_idx]
+        P_D_stop = P_D[stop_idx]
+        print(f"Episode {ep}: STOP at t = {t_stop:.1f} h, "
+              f"purity = {purity_stop:.2f}, V = {V_stop:.1f} L, "
+              f"P_D = {P_D_stop:.2f} $/mol")
+    else:
+        print(f"Episode {ep}: agent never STOPped within horizon.")
+
+    plt.figure(figsize=(12,6))
+
+    # Top: purity, volume, STOP marker
+    ax1 = plt.subplot(2,1,1)
+    ax1.plot(t_steps, purity, label='Purity D/(D+U)')
+    ax1.plot(t_steps, V, label='Volume V (L)')
+    stop_indices = np.where(np.array(actions) == 0)[0]
+    if len(stop_indices) > 0:
+        t_stop = t_steps[stop_indices[0]]
+        ax1.axvline(t_stop, color='k', linestyle='--', label='STOP')
+    ax1.set_ylabel('Purity / Volume')
+    ax1.set_title(f'Episode {ep}: Process trajectory')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Bottom: market prices
+    ax2 = plt.subplot(2,1,2, sharex=ax1)
+    ax2.plot(t_steps, P_B, label='P_B ($/mol)')
+    ax2.plot(t_steps, P_D, label='P_D ($/mol)')
+    if len(stop_indices) > 0:
+        ax2.axvline(t_stop, color='k', linestyle='--', label='STOP')
+    ax2.set_xlabel('Time (h)')
+    ax2.set_ylabel('Price ($/mol)')
+    ax2.set_title('Market price trajectory')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+# Random Policy vs DQN without improvements
+    # plt.figure(figsize=(12,6))
+    # plt.plot(scores, label="DQN (learning)", alpha=0.7)
+    # plt.plot(random_scores, label="Random Policy", linestyle="--", alpha=0.8)
+    # plt.axhline(0, color="black", linewidth=1)
+    # plt.xlabel("Episode")
+    # plt.ylabel("Episode Reward")
+    # plt.title("DQN vs Random Policy on BatchEnv")
+    # plt.legend()
+    # plt.grid(True)
+    # plt.tight_layout()
+    # plt.show()
